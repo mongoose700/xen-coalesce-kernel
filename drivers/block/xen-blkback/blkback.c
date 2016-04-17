@@ -1067,11 +1067,64 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
 	}
 }
 
+
+// KevinBoos: start
+// code for saving bio completions for non-coalescing purposes (microbenchmark injecting)
+LIST_HEAD(delayed_bio_list);
+
+struct delayed_bio {
+	struct list_head list;
+	struct bio *bio;
+	int error;
+};
+
+static void save_delayed_bio(struct bio *bio, int error) 
+{
+	struct delayed_bio *dbio;
+
+	// increment reference count to ensure the bio isn't freed before we can deliver it
+	bio_get(bio);
+
+	dbio = kmalloc(sizeof(struct delayed_bio), GFP_KERNEL);
+	dbio->bio = bio;
+	dbio->error = error;
+	list_add_tail(&dbio->list, &delayed_bio_list);
+}
+
+
+
+// TODO:  finish this
+static void deliver_delayed_bios(int how_many)
+{
+	while (how_many--) {
+		// mimicing a queue, pop head node off of delayed_bio_list
+		struct delayed_bio *dbio = list_first_entry(&delayed_bio_list, struct delayed_bio, list);
+		list_del(&dbio->list);
+	
+
+		{ // original end_block_io_op code start
+			__end_block_io_op(dbio->bio->bi_private, dbio->error);
+			bio_put(dbio->bio);
+		} // original end_block_io_op code end
+
+		// cleanup 
+		bio_put(dbio->bio); // release the extra reference count from save_delayed_bio()
+		kfree(dbio);
+	}
+}
+
 /*
  * bio callback.
  */
 static void end_block_io_op(struct bio *bio, int error)
 {
+	//KevinBoos: here: save bio for later 
+	if (false) { //TODO: fix condition to be triggered upon
+		save_delayed_bio(bio, error);
+		return;
+	}
+	//KevinBoos: end of bio saving, original code below
+
 	__end_block_io_op(bio->bi_private, error);
 	bio_put(bio);
 }
