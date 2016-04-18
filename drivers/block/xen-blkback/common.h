@@ -234,6 +234,15 @@ struct xen_vbd {
 
 struct backend_info;
 
+struct coalesce_info {
+	unsigned short count_up;
+	unsigned short skip_up;
+	unsigned short counter;
+	struct timespec epoch_start;
+	unsigned int curr_iops;
+	unsigned int next_iops;
+};
+
 /* Number of available flags */
 #define PERSISTENT_GNT_FLAGS_SIZE	2
 /* This persistent grant is currently in use */
@@ -317,6 +326,9 @@ struct xen_blkif {
 	struct work_struct	free_work;
 	/* Thread shutdown wait queue. */
 	wait_queue_head_t	shutdown_wq;
+
+	/* Information to keep track of interrupt coalescing */
+	struct coalesce_info	coalesce_info;
 };
 
 struct seg_buf {
@@ -370,6 +382,7 @@ struct phys_req {
 	struct block_device	*bdev;
 	blkif_sector_t		sector_number;
 };
+
 int xen_blkif_interface_init(void);
 
 int xen_blkif_xenbus_init(void);
