@@ -49,6 +49,9 @@
 #include <xen/balloon.h>
 #include "common.h"
 
+// KevinBoos: stuff for sysfs entries
+//#include <linux/module.h>
+//#include <linux/init.h>
 
 
 //KevinBoos: structure for keeping track of CIF on a per-guest basis
@@ -105,7 +108,7 @@ static void decrement_cif(int guest_domid)
  */
 
 static int xen_blkif_max_buffer_pages = 1024;
-module_param_named(max_buffer_pages, xen_blkif_max_buffer_pages, int, 0644);
+module_param_named(max_buffer_pages, xen_blkif_max_buffer_pages, int, 0664);
 MODULE_PARM_DESC(max_buffer_pages,
 "Maximum number of free pages to keep in each block backend buffer");
 
@@ -121,7 +124,7 @@ MODULE_PARM_DESC(max_buffer_pages,
  */
 
 static int xen_blkif_max_pgrants = 1056;
-module_param_named(max_persistent_grants, xen_blkif_max_pgrants, int, 0644);
+module_param_named(max_persistent_grants, xen_blkif_max_pgrants, int, 0664);
 MODULE_PARM_DESC(max_persistent_grants,
                  "Maximum number of grants to map persistently");
 
@@ -1071,12 +1074,14 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
 // KevinBoos: start
 // code for saving bio completions for non-coalescing purposes (microbenchmark injecting)
 LIST_HEAD(delayed_bio_list);
+static int num_delayed_bios;
 
 struct delayed_bio {
 	struct list_head list;
 	struct bio *bio;
 	int error;
 };
+
 
 static void save_delayed_bio(struct bio *bio, int error) 
 {
@@ -1089,29 +1094,91 @@ static void save_delayed_bio(struct bio *bio, int error)
 	dbio->bio = bio;
 	dbio->error = error;
 	list_add_tail(&dbio->list, &delayed_bio_list);
+	num_delayed_bios++;
 }
 
 
-
-// TODO:  finish this
 static void deliver_delayed_bios(int how_many)
 {
-	while (how_many--) {
+	printk("KevinBoos %s: delivering %d saved bios\n", __FUNCTION__, how_many);
+
+	while (how_many && (how_many <= num_delayed_bios)) {
 		// mimicing a queue, pop head node off of delayed_bio_list
 		struct delayed_bio *dbio = list_first_entry(&delayed_bio_list, struct delayed_bio, list);
+		if (!dbio) {
+			printk("KevinBoos %s: serious error: dbio at front of list was null!\n");
+			return;
+		}
 		list_del(&dbio->list);
+		num_delayed_bios--;
 	
+		bio_put(dbio->bio); // release the extra reference count from save_delayed_bio()
 
 		{ // original end_block_io_op code start
 			__end_block_io_op(dbio->bio->bi_private, dbio->error);
 			bio_put(dbio->bio);
 		} // original end_block_io_op code end
 
-		// cleanup 
-		bio_put(dbio->bio); // release the extra reference count from save_delayed_bio()
 		kfree(dbio);
+		how_many--;
 	}
 }
+
+
+// sysfs code for controlling how interrupts are delayed (injection trigger/rates)
+static ssize_t deliver_interrupts_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", num_delayed_bios);
+}
+
+static ssize_t deliver_interrupts_store(struct kobject *kobj, struct kobj_attribute *attr, char *buf, size_t count)
+{
+	int num_to_deliver;
+	if (count < 1)
+		return -EINVAL;
+
+	if (buf[0] == 'a')
+		num_to_deliver = num_delayed_bios; // deliver all saved bios
+	else
+		sscanf(buf, "%du", &num_to_deliver); // specific number to deliver
+
+	deliver_delayed_bios(num_to_deliver);
+	return count;
+}
+
+static int delaying_interrupts = 0; // disabled initially until enabled via sysfs entries
+static ssize_t enable_delay_interrupts_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", delaying_interrupts);
+}
+
+static ssize_t enable_delay_interrupts_store(struct kobject *kobj, struct kobj_attribute *attr, char *buf, size_t count)
+{
+	int temp;
+	printk("KevinBoos: %s: buf=%s\n", __FUNCTION__, buf);
+	sscanf(buf, "%du", &temp);
+	if (temp == 0 || temp == 1) {
+		delaying_interrupts = temp;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static struct kobject *di_kobj;
+static struct kobj_attribute deliver_interrupts_attr = __ATTR(deliver_interrupts, 0664 /*(S_IWUSR | S_IRUGO)*/, deliver_interrupts_show, deliver_interrupts_store);
+static struct kobj_attribute delay_interrupts_attr = __ATTR(enable_delay_interrupts, 0664 /*(S_IWUSR | S_IRUGO)*/, enable_delay_interrupts_show, enable_delay_interrupts_store);
+static struct attribute *di_attrs[] = {
+	&deliver_interrupts_attr.attr,
+	&delay_interrupts_attr.attr,
+	NULL,
+};
+
+struct attribute_group di_attr_group = {
+	.attrs = di_attrs,
+};
+//KevinBoos: end
+
 
 /*
  * bio callback.
@@ -1119,7 +1186,7 @@ static void deliver_delayed_bios(int how_many)
 static void end_block_io_op(struct bio *bio, int error)
 {
 	//KevinBoos: here: save bio for later 
-	if (false) { //TODO: fix condition to be triggered upon
+	if (delaying_interrupts) { //TODO: fix condition to be triggered upon
 		save_delayed_bio(bio, error);
 		return;
 	}
@@ -1490,7 +1557,16 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 
 static int __init xen_blkif_init(void)
 {
-	//KevinBoos: can initialize stuff here
+	//KevinBoos: start:  initialize stuff here
+	int error;
+	di_kobj = kobject_create_and_add("deliver_delay_interrupts", &(THIS_MODULE->mkobj.kobj));
+	if (!di_kobj)
+		return -ENOMEM;
+
+	error = sysfs_create_group(di_kobj, &di_attr_group);
+	if (error)
+		printk("KevinBoos: %s: failed to create sysfs entries\n", __FUNCTION__);
+	//KevinBoos: end, original code below
 
 	int rc = 0;
 
