@@ -103,11 +103,14 @@ module_param(log_stats, int, 0644);
 /* Number of free pages to remove on each call to free_xenballooned_pages */
 #define NUM_BATCH_FREE_PAGES 10
 
-/* Number of nanoseconds between when coalescing rate is recalculated */
+/*
+ * Number of nanoseconds between when coalescing rate is recalculated.
+ * It must be less than 1 * NSEC_PER_SEC for the current logic to make sense.
+ */
 #define EPOCH_PERIOD (200 * NSEC_PER_MSEC)
 
 /* Threshold of IOPS below which no coalescing is done */
-#define IOPS_THRESHOLD 1000
+#define IOPS_THRESHOLD 100
 
 /* Threshold of commands-in-flight below which no coalescing is done */
 #define CIF_THRESHOLD 4
@@ -1271,8 +1274,7 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 	xen_blkif_get(blkif);
 	atomic_inc(&blkif->inflight);
 
-	blkif->coalesce_info.next_iops += NSEC_PER_SEC / EPOCH_PERIOD;
-	printk(KERN_DEBUG "incrementing iops: %i\n", blkif->coalesce_info.next_iops);
+	atomic_add(NSEC_PER_SEC / EPOCH_PERIOD, &blkif->coalesce_info.next_iops);
 
 	for (i = 0; i < nseg; i++) {
 		while ((bio == NULL) ||
@@ -1345,8 +1347,9 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 	return -EIO;
 }
 
-static void coalesce_recalc(struct coalesce_info *ci, int cif)
+static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
 {
+	ci->curr_iops = atomic_xchg(&ci->next_iops, 0);
 	if (ci->curr_iops < IOPS_THRESHOLD || cif < CIF_THRESHOLD) {
 		/* R = 1 */
 		ci->count_up = 1;
@@ -1368,8 +1371,6 @@ static void coalesce_recalc(struct coalesce_info *ci, int cif)
 		ci->count_up = 1;
 		ci->skip_up = cif / (2 * CIF_THRESHOLD);
 	}
-	ci->curr_iops = ci->next_iops;
-	ci->next_iops = 0;
 	printk(KERN_DEBUG "curr_iops: %i, cif: %i, count_up: %i, skip_up: %i\n",
 		ci->curr_iops, cif, ci->count_up, ci->skip_up);
 }
@@ -1377,40 +1378,43 @@ static void coalesce_recalc(struct coalesce_info *ci, int cif)
 /*
  * Check if this interrupt should be sent now or should be sent later
  */
-static int should_send_now(struct coalesce_info *ci, int cif)
+static inline int should_send_now(struct coalesce_info *ci, int cif)
 {
+	unsigned long flags;
 	struct timespec now;
 	__kernel_time_t sec_diff;
 	long nsec_diff;
+	int should_send;
 
 	now = CURRENT_TIME;
+	spin_lock_irqsave(&ci->recalc_lock, flags);
+
 	sec_diff = now.tv_sec - ci->epoch_start.tv_sec;
 	nsec_diff = now.tv_nsec - ci->epoch_start.tv_nsec;
 
 	/* Check if it the epoch has ended, and we need to recalculate our policy */
-	if ((sec_diff > 1) || (nsec_diff > EPOCH_PERIOD)
-		|| (sec_diff == 1 && nsec_diff > EPOCH_PERIOD - NSEC_PER_SEC)) {
+	if ((sec_diff > 1) || (sec_diff * NSEC_PER_SEC + nsec_diff > EPOCH_PERIOD)) {
 		coalesce_recalc(ci, cif);
 		ci->epoch_start = now;
-                /* Send now, to restart the counter intelligently */
-		ci->counter = 1;
-		return 1;
 	}
 
 	/* Decide if we should send now */
 	if (cif < CIF_THRESHOLD) {
 		ci->counter = 1;
-		return 1;
+		should_send = 1;
 	} else if (ci->counter < ci->count_up) {
 		ci->counter++;
-		return 1;
+		should_send = 1;
 	} else if (ci->counter >= ci->skip_up) {
 		ci->counter = 1;
-		return 1;
+		should_send = 1;
 	} else {
 		ci->counter = 1;
-		return 0;
+		should_send = 0;
 	}
+
+	spin_unlock_irqrestore(&ci->recalc_lock, flags);
+	return should_send;
 }
 
 
@@ -1455,7 +1459,7 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	if (should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)))// && notify)
 		notify_remote_via_irq(blkif->irq);
 	else
-		printk(KERN_DEBUG "not sending the notification!");
+		printk(KERN_DEBUG "n");
 }
 
 static int __init xen_blkif_init(void)

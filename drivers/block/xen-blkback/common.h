@@ -240,7 +240,8 @@ struct coalesce_info {
 	unsigned short counter;
 	struct timespec epoch_start;
 	unsigned int curr_iops;
-	unsigned int next_iops;
+	atomic_t next_iops;
+	spinlock_t recalc_lock;
 };
 
 /* Number of available flags */

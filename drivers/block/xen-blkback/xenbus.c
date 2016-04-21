@@ -116,6 +116,17 @@ static void xen_update_blkif_status(struct xen_blkif *blkif)
 	}
 }
 
+static inline void init_coalesce_info(struct coalesce_info *ci)
+{
+	ci->count_up = 1;
+	ci->skip_up = 1;
+	ci->counter = 0;
+	ci->epoch_start = CURRENT_TIME;
+	ci->curr_iops = 0;
+	atomic_set(&ci->next_iops, 0);
+	spin_lock_init(&ci->recalc_lock);
+}
+
 static struct xen_blkif *xen_blkif_alloc(domid_t domid)
 {
 	struct xen_blkif *blkif;
@@ -169,6 +180,7 @@ static struct xen_blkif *xen_blkif_alloc(domid_t domid)
 	spin_lock_init(&blkif->pending_free_lock);
 	init_waitqueue_head(&blkif->pending_free_wq);
 	init_waitqueue_head(&blkif->shutdown_wq);
+	init_coalesce_info(&blkif->coalesce_info);
 
 	return blkif;
 
