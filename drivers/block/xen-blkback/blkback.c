@@ -49,54 +49,6 @@
 #include <xen/balloon.h>
 #include "common.h"
 
-// KevinBoos: stuff for sysfs entries
-//#include <linux/module.h>
-//#include <linux/init.h>
-
-
-//KevinBoos: structure for keeping track of CIF on a per-guest basis
-#include <linux/list.h>
-
-struct guest_cif {
-	struct list_head list;
-	domid_t guest_id;
-	int cif;
-};
-LIST_HEAD(cif_list);
-
-static struct guest_cif *get_cif(int guest_domid) 
-{
-	struct guest_cif *iter;
-	list_for_each_entry(iter, &cif_list, list)
-	{
-		if (guest_domid == iter->guest_id)
-			return iter;
-	}
-	return NULL;
-}
-
-static void increment_cif(int guest_domid)
-{
-	struct guest_cif *gc = get_cif(guest_domid);
-	if (!gc) 
-	{
-		gc = kmalloc(sizeof(struct guest_cif), GFP_KERNEL);
-		list_add_tail(&gc->list, &cif_list);
-	}
-
-	if (gc)
-		gc->cif++;
-}
-
-static void decrement_cif(int guest_domid)
-{
-	struct guest_cif *gc = get_cif(guest_domid);
-	if (gc)
-		gc->cif--;
-}
-
-
-
 /*
  * Maximum number of unused free pages to keep in the internal buffer.
  * Setting this to a value too low will reduce memory used in each backend,
@@ -1038,17 +990,6 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
 		                pending_req->nr_pages);
 		make_response(blkif, pending_req->id,
 			      pending_req->operation, pending_req->status);
-
-		printk("KevinBoos: %s blkif->domid=%d irq=%d blkif->inflight=%d\n",
-			__FUNCTION__,
-			blkif->domid,
-			blkif->irq,
-			blkif->inflight.counter
-		      );
-		decrement_cif(blkif->domid);
-
-
-
 		free_req(blkif, pending_req);
 		/*
 		 * Make sure the request is freed before releasing blkif,
@@ -1063,7 +1004,6 @@ static void __end_block_io_op(struct pending_req *pending_req, int error)
 		 * to be taken into account if the current model is changed.
 		 */
 		if (atomic_dec_and_test(&blkif->inflight) && atomic_read(&blkif->drain)) {
-			printk("KevinBoos: %s calling drain_complete: done=%d\n", __FUNCTION__, blkif->drain_complete.done);
 			complete(&blkif->drain_complete);
 		}
 		xen_blkif_put(blkif);
@@ -1480,9 +1420,6 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 
 	for (i = 0; i < nbio; i++)
 		submit_bio(operation, biolist[i]);
-
-	printk("KevinBoos: %s after submit_bio: domid=%d nbio=%d operation=%d \n", __FUNCTION__, blkif->domid, nbio, operation);
-	increment_cif(blkif->domid);
 
 	/* Let the I/Os go.. */
 	blk_finish_plug(&plug);
