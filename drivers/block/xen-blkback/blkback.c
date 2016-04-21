@@ -1456,10 +1456,9 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blk_rings->common, notify);
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
         
-	if (should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)))// && notify)
+	printk(notify ? "yes\n" : "no\n");
+	if (should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)) /*&& notify*/)
 		notify_remote_via_irq(blkif->irq);
-	else
-		printk(KERN_DEBUG "n");
 }
 
 static int __init xen_blkif_init(void)

@@ -180,6 +180,8 @@ static void xen_vcpu_setup(int cpu)
 	struct vcpu_info *vcpup;
 
 	BUG_ON(HYPERVISOR_shared_info == &xen_dummy_shared_info);
+	printk("[0] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
+
 
 	/*
 	 * This path is called twice on PVHVM - first during bootup via
@@ -1116,11 +1118,17 @@ void xen_setup_shared_info(void)
 		set_fixmap(FIX_PARAVIRT_BOOTMAP,
 			   xen_start_info->shared_info);
 
+		printk("[1] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
+
 		HYPERVISOR_shared_info =
 			(struct shared_info *)fix_to_virt(FIX_PARAVIRT_BOOTMAP);
-	} else
+	} else {
+
+		printk("[2] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
+
 		HYPERVISOR_shared_info =
 			(struct shared_info *)__va(xen_start_info->shared_info);
+	}
 
 #ifndef CONFIG_SMP
 	/* In UP this is as good a place as any to set up shared info */
@@ -1762,6 +1770,7 @@ void __ref xen_hvm_init_shared_info(void)
 		BUG();
 
 	HYPERVISOR_shared_info = (struct shared_info *)shared_info_page;
+	printk("[3] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
 
 	/* xen_vcpu is a pointer to the vcpu_info struct in the shared_info
 	 * page, we use it in the event channel upcall and in some pvclock
