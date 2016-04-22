@@ -103,17 +103,25 @@ module_param(log_stats, int, 0644);
 /* Number of free pages to remove on each call to free_xenballooned_pages */
 #define NUM_BATCH_FREE_PAGES 10
 
+/* Whether or not interrupt coalescing is currently enabled */
+static int enable_coalescing = 1; // enabled by default
+module_param(enable_coalescing, int, S_IWUSR | S_IWGRP | S_IRUGO);
+
 /*
  * Number of nanoseconds between when coalescing rate is recalculated.
  * It must be less than 1 * NSEC_PER_SEC for the current logic to make sense.
  */
-#define EPOCH_PERIOD (200 * NSEC_PER_MSEC)
+static long epoch_period = 200 * NSEC_PER_MSEC;
+module_param(epoch_period, long, S_IWUSR | S_IWGRP | S_IRUGO);
 
 /* Threshold of IOPS below which no coalescing is done */
-#define IOPS_THRESHOLD 100
+static int iops_threshold = 100;
+module_param(iops_threshold, int, S_IWUSR | S_IWGRP | S_IRUGO);
 
 /* Threshold of commands-in-flight below which no coalescing is done */
-#define CIF_THRESHOLD 4
+static int cif_threshold = 4;
+module_param(cif_threshold, int, S_IWUSR | S_IWGRP | S_IRUGO);
+
 
 static inline int get_free_page(struct xen_blkif *blkif, struct page **page)
 {
@@ -1058,7 +1066,7 @@ static void deliver_delayed_bios(int how_many)
 		// mimicing a queue, pop head node off of delayed_bio_list
 		struct delayed_bio *dbio = list_first_entry(&delayed_bio_list, struct delayed_bio, list);
 		if (!dbio) {
-			printk("KevinBoos %s: serious error: dbio at front of list was null!\n");
+			printk("KevinBoos %s: serious error: dbio at front of list was null!\n", __FUNCTION__);
 			return;
 		}
 		list_del(&dbio->list);
@@ -1118,8 +1126,8 @@ static ssize_t enable_delay_interrupts_store(struct kobject *kobj, struct kobj_a
 }
 
 static struct kobject *di_kobj;
-static struct kobj_attribute deliver_interrupts_attr = __ATTR(deliver_interrupts, 0664 /*(S_IWUSR | S_IRUGO)*/, deliver_interrupts_show, deliver_interrupts_store);
-static struct kobj_attribute delay_interrupts_attr = __ATTR(enable_delay_interrupts, 0664 /*(S_IWUSR | S_IRUGO)*/, enable_delay_interrupts_show, enable_delay_interrupts_store);
+static struct kobj_attribute deliver_interrupts_attr = __ATTR(deliver_interrupts, S_IWUSR | S_IWGRP | S_IRUGO, deliver_interrupts_show, deliver_interrupts_store);
+static struct kobj_attribute delay_interrupts_attr = __ATTR(enable_delay_interrupts, S_IWUSR | S_IWGRP| S_IRUGO, enable_delay_interrupts_show, enable_delay_interrupts_store);
 static struct attribute *di_attrs[] = {
 	&deliver_interrupts_attr.attr,
 	&delay_interrupts_attr.attr,
@@ -1391,7 +1399,7 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 	xen_blkif_get(blkif);
 	atomic_inc(&blkif->inflight);
 
-	atomic_add(NSEC_PER_SEC / EPOCH_PERIOD, &blkif->coalesce_info.next_iops);
+	atomic_add(NSEC_PER_SEC / epoch_period, &blkif->coalesce_info.next_iops);
 
 	for (i = 0; i < nseg; i++) {
 		while ((bio == NULL) ||
@@ -1467,26 +1475,26 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
 {
 	ci->curr_iops = atomic_xchg(&ci->next_iops, 0);
-	if (ci->curr_iops < IOPS_THRESHOLD || cif < CIF_THRESHOLD) {
+	if (ci->curr_iops < iops_threshold || cif < cif_threshold) {
 		/* R = 1 */
 		ci->count_up = 1;
 		ci->skip_up = 1;
-	} else if (cif < 2 * CIF_THRESHOLD) {
+	} else if (cif < 2 * cif_threshold) {
 		/* R = 0.8 */
 		ci->count_up = 4;
 		ci->skip_up = 5;
-	} else if (cif < 3 * CIF_THRESHOLD) {
+	} else if (cif < 3 * cif_threshold) {
 		/* R = 0.75 */
 		ci->count_up = 3;
 		ci->skip_up = 4;
-	} else if (cif < 4 * CIF_THRESHOLD) {
+	} else if (cif < 4 * cif_threshold) {
 		/* R = 0.66 */
 		ci->count_up = 2;
 		ci->skip_up = 3;
 	} else {
-		/* R = 8 / CIF_THRESHOLD */
+		/* R = 8 / cif_threshold */
 		ci->count_up = 1;
-		ci->skip_up = cif / (2 * CIF_THRESHOLD);
+		ci->skip_up = cif / (2 * cif_threshold);
 	}
 	printk(KERN_DEBUG "curr_iops: %i, cif: %i, count_up: %i, skip_up: %i\n",
 		ci->curr_iops, cif, ci->count_up, ci->skip_up);
@@ -1510,13 +1518,13 @@ static inline int should_send_now(struct coalesce_info *ci, int cif)
 	nsec_diff = now.tv_nsec - ci->epoch_start.tv_nsec;
 
 	/* Check if it the epoch has ended, and we need to recalculate our policy */
-	if ((sec_diff > 1) || (sec_diff * NSEC_PER_SEC + nsec_diff > EPOCH_PERIOD)) {
+	if ((sec_diff > 1) || (sec_diff * NSEC_PER_SEC + nsec_diff > epoch_period)) {
 		coalesce_recalc(ci, cif);
 		ci->epoch_start = now;
 	}
 
 	/* Decide if we should send now */
-	if (cif < CIF_THRESHOLD) {
+	if (cif < cif_threshold) {
 		ci->counter = 1;
 		should_send = 1;
 	} else if (ci->counter < ci->count_up) {
@@ -1573,8 +1581,12 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blk_rings->common, notify);
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
         
-	printk(notify ? "yes\n" : "no\n");
-	if (should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)) /*&& notify*/)
+	if (enable_coalescing) {
+		printk(notify ? "yes\n" : "no\n");
+		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)); /*&& notify*/
+	}
+
+	if (notify)
 		notify_remote_via_irq(blkif->irq);
 }
 
