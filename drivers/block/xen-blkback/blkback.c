@@ -1582,8 +1582,8 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
         
 	if (enable_coalescing) {
-		printk(notify ? "yes\n" : "no\n");
 		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)); /*&& notify*/
+		printk(notify ? "yes\n" : "no\n");
 	}
 
 	if (notify)
