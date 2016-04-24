@@ -136,6 +136,7 @@ EXPORT_SYMBOL_GPL(xen_have_vector_callback);
  * page as soon as fixmap is up and running.
  */
 struct shared_info *HYPERVISOR_shared_info = &xen_dummy_shared_info;
+EXPORT_SYMBOL(HYPERVISOR_shared_info); //KevinBoos: so we can access it in blkback module
 
 /*
  * Flag to determine whether vcpu info placement is available on all
@@ -1119,13 +1120,11 @@ void xen_setup_shared_info(void)
 			   xen_start_info->shared_info);
 
 		printk("[1] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
+		printk("[1.1] sizeof shared_scheduler_info = %ld\n", sizeof(struct shared_scheduler_info)); // KevinBoos
 
 		HYPERVISOR_shared_info =
 			(struct shared_info *)fix_to_virt(FIX_PARAVIRT_BOOTMAP);
 	} else {
-
-		printk("[2] sizeof shared_info struct = %ld\n", sizeof(struct shared_info)); // KevinBoos
-
 		HYPERVISOR_shared_info =
 			(struct shared_info *)__va(xen_start_info->shared_info);
 	}

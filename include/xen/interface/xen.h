@@ -529,6 +529,18 @@ struct vcpu_info {
 	struct pvclock_vcpu_time_info time;
 }; /* 64 bytes (x86) */
 
+
+/* KevinBoos */
+/* one struct instance per domain */
+/* MUST MATCH xen/include/public/xen.h  !!! */
+struct shared_scheduler_info {
+       domid_t domid;
+       int runstate;
+       signed long end_time; /* defined as s_time_t elsewhere */
+       int latest_vcpu_id; /* not really necessary */
+};
+
+
 /*
  * Xen/kernel shared data -- pointer provided in start_info.
  * NB. We expect that this struct is smaller than a page.
@@ -578,6 +590,10 @@ struct shared_info {
 
 	struct arch_shared_info arch;
 
+	/* KevinBoos: added for scheduler info */
+	/* hard cap at 4 domains, we do not have unlimited space */
+	char kevinpadding[24]; // apparently this struct is 24 bytes smaller than xen's definition
+	struct shared_scheduler_info sched_infos[4]; 
 };
 
 /*

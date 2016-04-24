@@ -103,6 +103,10 @@ module_param(log_stats, int, 0644);
 /* Number of free pages to remove on each call to free_xenballooned_pages */
 #define NUM_BATCH_FREE_PAGES 10
 
+/* KevinBoos: print debug messages or not */
+static int debug_printing = 1; // enabled by default
+module_param(debug_printing, int, S_IWUSR | S_IWGRP | S_IRUGO);
+
 /* Whether or not interrupt coalescing is currently enabled */
 static int enable_coalescing = 1; // enabled by default
 module_param(enable_coalescing, int, S_IWUSR | S_IWGRP | S_IRUGO);
@@ -1543,6 +1547,7 @@ static inline int should_send_now(struct coalesce_info *ci, int cif)
 }
 
 
+//extern struct shared_info *HYPERVISOR_shared_info; // KevinBoos
 
 /*
  * Put a response on the ring on how the operation fared.
@@ -1582,6 +1587,24 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
         
 	if (enable_coalescing) {
+		if (debug_printing) {
+			if (HYPERVISOR_shared_info) {
+				printk("KevinBoos %s: domid: %hu %hu %hu %hu\n", __FUNCTION__, 
+					HYPERVISOR_shared_info->sched_infos[0].domid,
+					HYPERVISOR_shared_info->sched_infos[1].domid,
+					HYPERVISOR_shared_info->sched_infos[2].domid,
+					HYPERVISOR_shared_info->sched_infos[3].domid);
+				printk("KevinBoos %s: first entry: domid=%hu runstate=%d end_time=%lld vcpu=%d\n", __FUNCTION__, 
+					HYPERVISOR_shared_info->sched_infos[0].domid,
+					HYPERVISOR_shared_info->sched_infos[0].runstate,
+					HYPERVISOR_shared_info->sched_infos[0].end_time,
+					HYPERVISOR_shared_info->sched_infos[0].latest_vcpu_id);
+			}
+			else {
+				printk("KevinBoos %s: HYPERVISOR_shared_info was null!!\n", __FUNCTION__);
+			}
+		}
+
 		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)); /*&& notify*/
 		printk(notify ? "yes\n" : "no\n");
 	}
