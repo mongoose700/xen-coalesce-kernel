@@ -104,7 +104,7 @@ module_param(log_stats, int, 0644);
 #define NUM_BATCH_FREE_PAGES 10
 
 /* KevinBoos: print debug messages or not */
-static int debug_printing = 1; // enabled by default
+static int debug_printing = 1;
 module_param(debug_printing, int, S_IWUSR | S_IWGRP | S_IRUGO);
 
 /* Whether or not interrupt coalescing is currently enabled */
@@ -1500,8 +1500,10 @@ static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
 		ci->count_up = 1;
 		ci->skip_up = cif / (2 * cif_threshold);
 	}
-	printk(KERN_DEBUG "curr_iops: %i, cif: %i, count_up: %i, skip_up: %i\n",
+	if (debug_printing) {
+		printk(KERN_DEBUG "curr_iops: %i, cif: %i, count_up: %i, skip_up: %i\n",
 		ci->curr_iops, cif, ci->count_up, ci->skip_up);
+	}
 }
 
 /*
@@ -1547,7 +1549,6 @@ static inline int should_send_now(struct coalesce_info *ci, int cif)
 }
 
 
-//extern struct shared_info *HYPERVISOR_shared_info; // KevinBoos
 
 /*
  * Put a response on the ring on how the operation fared.
@@ -1559,6 +1560,7 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	unsigned long     flags;
 	union blkif_back_rings *blk_rings = &blkif->blk_rings;
 	int notify;
+	long nsec; //KevinBoos
 
 	resp.id        = id;
 	resp.operation = op;
@@ -1589,24 +1591,36 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	if (enable_coalescing) {
 		if (debug_printing) {
 			if (HYPERVISOR_shared_info) {
-				printk("KevinBoos %s: domid: %hu %hu %hu %hu\n", __FUNCTION__, 
-					HYPERVISOR_shared_info->sched_infos[0].domid,
-					HYPERVISOR_shared_info->sched_infos[1].domid,
-					HYPERVISOR_shared_info->sched_infos[2].domid,
-					HYPERVISOR_shared_info->sched_infos[3].domid);
-				printk("KevinBoos %s: first entry: domid=%hu runstate=%d end_time=%lld vcpu=%d\n", __FUNCTION__, 
-					HYPERVISOR_shared_info->sched_infos[0].domid,
-					HYPERVISOR_shared_info->sched_infos[0].runstate,
-					HYPERVISOR_shared_info->sched_infos[0].end_time,
-					HYPERVISOR_shared_info->sched_infos[0].latest_vcpu_id);
-			}
-			else {
-				printk("KevinBoos %s: HYPERVISOR_shared_info was null!!\n", __FUNCTION__);
+				struct timespec ts; 
+				getnstimeofday(&ts);
+				nsec = ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+
+			//	printk("KevinBoos %s: domid: %hu %hu %hu %hu \n", __FUNCTION__, 
+			//		HYPERVISOR_shared_info->sched_infos[0].domid,
+			//		HYPERVISOR_shared_info->sched_infos[1].domid,
+			//		HYPERVISOR_shared_info->sched_infos[2].domid,
+			//		HYPERVISOR_shared_info->sched_infos[3].domid);
+			//	printk("KevinBoos %s: first entry: domid=%hu runstate=%d end_time=%ld vcpu=%d\n", __FUNCTION__, 
+			//		HYPERVISOR_shared_info->sched_infos[0].domid,
+			//		HYPERVISOR_shared_info->sched_infos[0].runstate,
+			//		HYPERVISOR_shared_info->sched_infos[0].end_time,
+			//		HYPERVISOR_shared_info->sched_infos[0].latest_vcpu_id);
+				int i; 
+				for (i = 0; i < 4; i++) {
+					// only print if the domid entry is initialized and running
+					if (HYPERVISOR_shared_info->sched_infos[i].domid != 12345 && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
+						printk("KevinBoos %s: wc_time=%ld remaining_time=%ld  domid=%hu \n", __FUNCTION__, 
+							nsec,
+							HYPERVISOR_shared_info->sched_infos[i].end_time - nsec,
+							HYPERVISOR_shared_info->sched_infos[i].domid);
+					}
+				}
 			}
 		}
 
 		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)); /*&& notify*/
-		printk(notify ? "yes\n" : "no\n");
+		if (debug_printing) 
+			printk(notify ? "yes\n" : "no\n");
 	}
 
 	if (notify)
