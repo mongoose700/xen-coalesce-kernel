@@ -1064,13 +1064,13 @@ static void save_delayed_bio(struct bio *bio, int error)
 
 static void deliver_delayed_bios(int how_many)
 {
-	printk("KevinBoos %s: delivering %d saved bios\n", __FUNCTION__, how_many);
+	//printk("KevinBoos %s: delivering %d saved bios\n", __FUNCTION__, how_many);
 
 	while (how_many && (how_many <= num_delayed_bios)) {
 		// mimicing a queue, pop head node off of delayed_bio_list
 		struct delayed_bio *dbio = list_first_entry(&delayed_bio_list, struct delayed_bio, list);
 		if (!dbio) {
-			printk("KevinBoos %s: serious error: dbio at front of list was null!\n", __FUNCTION__);
+			//printk("KevinBoos %s: serious error: dbio at front of list was null!\n", __FUNCTION__);
 			return;
 		}
 		list_del(&dbio->list);
@@ -1119,7 +1119,7 @@ static ssize_t enable_delay_interrupts_show(struct kobject *kobj, struct kobj_at
 static ssize_t enable_delay_interrupts_store(struct kobject *kobj, struct kobj_attribute *attr, char *buf, size_t count)
 {
 	int temp;
-	printk("KevinBoos: %s: buf=%s\n", __FUNCTION__, buf);
+	//printk("KevinBoos: %s: buf=%s\n", __FUNCTION__, buf);
 	sscanf(buf, "%du", &temp);
 	if (temp == 0 || temp == 1) {
 		delaying_interrupts = temp;
@@ -1509,15 +1509,22 @@ static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
 /*
  * Check if this interrupt should be sent now or should be sent later
  */
-static inline int should_send_now(struct coalesce_info *ci, int cif)
+static inline int should_send_now(struct coalesce_info *ci, int cif, int end_time)
 {
 	unsigned long flags;
 	struct timespec now;
 	__kernel_time_t sec_diff;
 	long nsec_diff;
 	int should_send;
+	unsigned long long now_in_nsec;
 
 	now = CURRENT_TIME;
+	now_in_nsec = now.tv_sec * NSEC_PER_SEC + now.tv_nsec;
+	if (end_time - now_in_nsec < NSEC_PER_MSEC)
+	{
+		printk("sending quick interrupt");
+		return 1;
+	}
 	spin_lock_irqsave(&ci->recalc_lock, flags);
 
 	sec_diff = now.tv_sec - ci->epoch_start.tv_sec;
@@ -1548,7 +1555,38 @@ static inline int should_send_now(struct coalesce_info *ci, int cif)
 	return should_send;
 }
 
+static inline void print_shared_info(void)
+{
+	if (debug_printing && HYPERVISOR_shared_info) {
+		struct timespec ts; 
+		int i; 
+		long nsec; //KevinBoos
+		getnstimeofday(&ts);
+		nsec = ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+		for (i = 0; i < 4; i++) {
+			// only print if the domid entry is initialized and running
+			if (HYPERVISOR_shared_info->sched_infos[i].domid != 12345 && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
+				printk("KevinBoos %s: wc_time=%ld remaining_time=%ld  domid=%hu \n", __FUNCTION__, 
+					nsec,
+					HYPERVISOR_shared_info->sched_infos[i].end_time - nsec,
+					HYPERVISOR_shared_info->sched_infos[i].domid);
+			}
+		}
+	}
+}
 
+static inline signed int get_end_time(int domid)
+{
+	if (HYPERVISOR_shared_info) {
+		int i; 
+		for (i = 0; i < 4; i++) {
+			if (HYPERVISOR_shared_info->sched_infos[i].domid == domid && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
+				return HYPERVISOR_shared_info->sched_infos[i].end_time;
+			}
+		}
+	}
+	return 0;
+}
 
 /*
  * Put a response on the ring on how the operation fared.
@@ -1560,7 +1598,6 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	unsigned long     flags;
 	union blkif_back_rings *blk_rings = &blkif->blk_rings;
 	int notify;
-	long nsec; //KevinBoos
 
 	resp.id        = id;
 	resp.operation = op;
@@ -1589,36 +1626,9 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
         
 	if (enable_coalescing) {
-		if (debug_printing) {
-			if (HYPERVISOR_shared_info) {
-				struct timespec ts; 
-				getnstimeofday(&ts);
-				nsec = ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+		print_shared_info();
 
-			//	printk("KevinBoos %s: domid: %hu %hu %hu %hu \n", __FUNCTION__, 
-			//		HYPERVISOR_shared_info->sched_infos[0].domid,
-			//		HYPERVISOR_shared_info->sched_infos[1].domid,
-			//		HYPERVISOR_shared_info->sched_infos[2].domid,
-			//		HYPERVISOR_shared_info->sched_infos[3].domid);
-			//	printk("KevinBoos %s: first entry: domid=%hu runstate=%d end_time=%ld vcpu=%d\n", __FUNCTION__, 
-			//		HYPERVISOR_shared_info->sched_infos[0].domid,
-			//		HYPERVISOR_shared_info->sched_infos[0].runstate,
-			//		HYPERVISOR_shared_info->sched_infos[0].end_time,
-			//		HYPERVISOR_shared_info->sched_infos[0].latest_vcpu_id);
-				int i; 
-				for (i = 0; i < 4; i++) {
-					// only print if the domid entry is initialized and running
-					if (HYPERVISOR_shared_info->sched_infos[i].domid != 12345 && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
-						printk("KevinBoos %s: wc_time=%ld remaining_time=%ld  domid=%hu \n", __FUNCTION__, 
-							nsec,
-							HYPERVISOR_shared_info->sched_infos[i].end_time - nsec,
-							HYPERVISOR_shared_info->sched_infos[i].domid);
-					}
-				}
-			}
-		}
-
-		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight)); /*&& notify*/
+		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight), get_end_time(blkif->domid)); /*&& notify*/
 		if (debug_printing) 
 			printk(notify ? "yes\n" : "no\n");
 	}
@@ -1631,16 +1641,18 @@ static int __init xen_blkif_init(void)
 {
 	//KevinBoos: start:  initialize stuff here
 	int error;
+	// Original initialization
+	int rc = 0;
+
 	di_kobj = kobject_create_and_add("deliver_delay_interrupts", &(THIS_MODULE->mkobj.kobj));
 	if (!di_kobj)
 		return -ENOMEM;
 
 	error = sysfs_create_group(di_kobj, &di_attr_group);
-	if (error)
-		printk("KevinBoos: %s: failed to create sysfs entries\n", __FUNCTION__);
+	//if (error)
+		//printk("KevinBoos: %s: failed to create sysfs entries\n", __FUNCTION__);
 	//KevinBoos: end, original code below
 
-	int rc = 0;
 
 	if (!xen_domain())
 		return -ENODEV;
