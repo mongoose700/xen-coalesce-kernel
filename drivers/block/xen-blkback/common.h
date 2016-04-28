@@ -238,7 +238,7 @@ struct coalesce_info {
 	unsigned short count_up;
 	unsigned short skip_up;
 	unsigned short counter;
-	struct timespec epoch_start;
+	long long epoch_start;
 	unsigned int curr_iops;
 	atomic_t next_iops;
 	spinlock_t recalc_lock;

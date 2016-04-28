@@ -111,9 +111,12 @@ module_param(debug_printing, int, S_IWUSR | S_IWGRP | S_IRUGO);
 static int enable_coalescing = 1; // enabled by default
 module_param(enable_coalescing, int, S_IWUSR | S_IWGRP | S_IRUGO);
 
+/* Whether or not scheduler awareness is currently enabled */
+static int enable_scheduler_awareness = 1; // enabled by default
+module_param(enable_scheduler_awareness, int, S_IWUSR | S_IWGRP | S_IRUGO);
+
 /*
  * Number of nanoseconds between when coalescing rate is recalculated.
- * It must be less than 1 * NSEC_PER_SEC for the current logic to make sense.
  */
 static long epoch_period = 200 * NSEC_PER_MSEC;
 module_param(epoch_period, long, S_IWUSR | S_IWGRP | S_IRUGO);
@@ -1476,7 +1479,7 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 	return -EIO;
 }
 
-static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
+static inline void coalesce_recalc(struct coalesce_info *ci, int cif, long long remaining)
 {
 	ci->curr_iops = atomic_xchg(&ci->next_iops, 0);
 	if (ci->curr_iops < iops_threshold || cif < cif_threshold) {
@@ -1500,39 +1503,78 @@ static inline void coalesce_recalc(struct coalesce_info *ci, int cif)
 		ci->count_up = 1;
 		ci->skip_up = cif / (2 * cif_threshold);
 	}
+
 	if (debug_printing) {
 		printk(KERN_DEBUG "curr_iops: %i, cif: %i, count_up: %i, skip_up: %i\n",
 		ci->curr_iops, cif, ci->count_up, ci->skip_up);
 	}
 }
 
+/** Gets the current time in nanoseconds */
+static inline long long get_total_nsec(void)
+{
+	struct timespec now;
+	getnstimeofday(&now);
+	return now.tv_sec * ((long long) NSEC_PER_SEC) + now.tv_nsec;
+}
+
 /*
  * Check if this interrupt should be sent now or should be sent later
  */
-static inline int should_send_now(struct coalesce_info *ci, int cif, int end_time)
+static inline int should_send_now(struct coalesce_info *ci, int cif, long long end_time)
 {
 	unsigned long flags;
-	struct timespec now;
-	__kernel_time_t sec_diff;
-	long nsec_diff;
 	int should_send;
-	unsigned long long now_in_nsec;
+	long long now, remaining;
+	long long epoch_so_far;
+	int countup_inc = 0;
+	int skipup_inc = 0;
+	long nsec_per_io;
+	long io_per_event;
+	long nsec_per_event;
 
-	now = CURRENT_TIME;
-	now_in_nsec = now.tv_sec * NSEC_PER_SEC + now.tv_nsec;
-	if (end_time - now_in_nsec < NSEC_PER_MSEC)
-	{
-		printk("sending quick interrupt");
-		return 1;
-	}
+	now = get_total_nsec();
+	remaining = (end_time <= 0)  ?  -1 : (end_time - now);
+	printk("now: %llu, end: %llu, remaining: %llu\n", now, end_time, remaining);
+
 	spin_lock_irqsave(&ci->recalc_lock, flags);
 
-	sec_diff = now.tv_sec - ci->epoch_start.tv_sec;
-	nsec_diff = now.tv_nsec - ci->epoch_start.tv_nsec;
+	if (enable_scheduler_awareness && ci->curr_iops != 0) {	
+		nsec_per_io = NSEC_PER_SEC / ci->curr_iops;
+		io_per_event = (ci->skip_up < ci->count_up * 2 ? 2 : ci->skip_up);
+		nsec_per_event = nsec_per_io * io_per_event;
+	
+		if (remaining > 0 && remaining < nsec_per_event)
+		{
+			// domain's timeslice is about to end, deliver!!
+			should_send = 1;
+			printk("Sending because timeslice is ending!");
+			goto out_should_send;
+		}
+	}
+
+	// KevinBoos: here, timeslice is still well underway (or hasn't started yet)
+	//if (remaining > 15 * NSEC_PER_MSEC) 
+	//{
+	//	skipup_inc = 3;
+	//}
+#if 0
+	if (remaining > 5 * NSEC_PER_MSEC) 
+	{
+		skipup_inc = 2;
+	}
+	else if (remaining < 5 * NSEC_PER_MSEC) 
+	{
+		countup_inc = 1;
+	}
+#endif
+
+
+	epoch_so_far = now - ci->epoch_start;
 
 	/* Check if it the epoch has ended, and we need to recalculate our policy */
-	if ((sec_diff > 1) || (sec_diff * NSEC_PER_SEC + nsec_diff > epoch_period)) {
-		coalesce_recalc(ci, cif);
+	if (epoch_so_far >= epoch_period) {
+		coalesce_recalc(ci, cif, remaining);
 		ci->epoch_start = now;
 	}
 
@@ -1540,10 +1582,10 @@ static inline int should_send_now(struct coalesce_info *ci, int cif, int end_tim
 	if (cif < cif_threshold) {
 		ci->counter = 1;
 		should_send = 1;
-	} else if (ci->counter < ci->count_up) {
+	} else if (ci->counter < ci->count_up + countup_inc) {
 		ci->counter++;
 		should_send = 1;
-	} else if (ci->counter >= ci->skip_up) {
+	} else if (ci->counter >= ci->skip_up + skipup_inc) {
 		ci->counter = 1;
 		should_send = 1;
 	} else {
@@ -1551,46 +1593,58 @@ static inline int should_send_now(struct coalesce_info *ci, int cif, int end_tim
 		should_send = 0;
 	}
 
+out_should_send:
 	spin_unlock_irqrestore(&ci->recalc_lock, flags);
 	return should_send;
 }
 
 static inline void print_shared_info(void)
 {
-	if (debug_printing && HYPERVISOR_shared_info) {
+	if (debug_printing) {
 		struct timespec ts; 
 		int i; 
 		long nsec; //KevinBoos
 		getnstimeofday(&ts);
 		nsec = ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
 		for (i = 0; i < 4; i++) {
+			struct shared_scheduler_info *info = &HYPERVISOR_shared_info->sched_infos[i];
 			// only print if the domid entry is initialized and running
-			if (HYPERVISOR_shared_info->sched_infos[i].domid != 12345 && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
+			if (info->domid != 12345 && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
 				printk("KevinBoos %s: wc_time=%ld remaining_time=%ld  domid=%hu \n", __FUNCTION__, 
 					nsec,
-					HYPERVISOR_shared_info->sched_infos[i].end_time - nsec,
-					HYPERVISOR_shared_info->sched_infos[i].domid);
+					info->end_time - nsec,
+					info->domid);
+			} else {
+				//printk("%i is %i\n", i, info->domid);
 			}
 		}
 	}
 }
 
-static inline signed int get_end_time(int domid)
+static inline long long get_end_time(int domid)
 {
-	if (HYPERVISOR_shared_info) {
+	if (enable_scheduler_awareness && HYPERVISOR_shared_info) {
 		int i; 
+		//printk("domid: %d\n", domid);
 		for (i = 0; i < 4; i++) {
-			if (HYPERVISOR_shared_info->sched_infos[i].domid == domid && HYPERVISOR_shared_info->sched_infos[i].runstate == 0) {
-				return HYPERVISOR_shared_info->sched_infos[i].end_time;
+			struct shared_scheduler_info *info = &HYPERVISOR_shared_info->sched_infos[i];
+			//printk("%d == %d && %d == %d\n", info->domid, domid, info->runstate, 0);
+			if (info->domid == domid) {
+				if (info->runstate == 0)
+					return info->end_time;
+				else
+					return -1; // domid was not running
 			}
 		}
 	}
-	return 0;
+	// couldn't find domid
+	return -1;
 }
 
 /*
  * Put a response on the ring on how the operation fared.
  */
+static int num_responses_without_notify = 0; // KevinBoos
 static void make_response(struct xen_blkif *blkif, u64 id,
 			  unsigned short op, int st)
 {
@@ -1631,10 +1685,24 @@ static void make_response(struct xen_blkif *blkif, u64 id,
 		notify = should_send_now(&blkif->coalesce_info, atomic_read(&blkif->inflight), get_end_time(blkif->domid)); /*&& notify*/
 		if (debug_printing) 
 			printk(notify ? "yes\n" : "no\n");
+
+		/*
+		 * KevinBoos: there is a problem (probably ring buffer requests getting overwritten by responses or vice versa)
+		 * that occurs when we skip sending a notify signal N times in a row.
+		 * This is sort of a dirty hack to avoid this.
+		 */
+		if (num_responses_without_notify > 16 /*arbitrary limit*/)
+			notify = 1;
 	}
 
-	if (notify)
+	if (notify) {
+		num_responses_without_notify = 0;
 		notify_remote_via_irq(blkif->irq);
+	}
+	else  {
+		num_responses_without_notify++;
+	}
+
 }
 
 static int __init xen_blkif_init(void)

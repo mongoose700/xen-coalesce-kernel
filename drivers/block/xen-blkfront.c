@@ -100,6 +100,14 @@ MODULE_PARM_DESC(max, "Maximum amount of segments in indirect requests (default 
 
 #define BLK_RING_SIZE __CONST_RING_SIZE(blkif, PAGE_SIZE)
 
+
+//KevinBoos: parameters to control latency printouts
+static int enable_print_latency = 0;
+module_param(enable_print_latency, int, S_IWUSR | S_IWGRP | S_IRUGO);
+
+
+
+
 /*
  * We have one of these per vbd, whether ide, scsi or 'other'.  They
  * hang in private_data off the gendisk structure. We may end up
@@ -133,6 +141,10 @@ struct blkfront_info
 	unsigned int feature_persistent:1;
 	unsigned int max_indirect_segments;
 	int is_ready;
+
+	//KevinBoos: latency metrics
+	long start_times[BLK_RING_SIZE]; // indexed by id
+
 };
 
 static unsigned int nr_minors;
@@ -379,6 +391,17 @@ static int blkif_ioctl(struct block_device *bdev, fmode_t mode,
 	return 0;
 }
 
+
+
+/** Gets the current time in nanoseconds */
+static inline long get_total_nsec(void)
+{
+	struct timespec now;
+	getnstimeofday(&now);
+	return now.tv_sec * ((long)NSEC_PER_SEC) + now.tv_nsec;
+}
+
+
 /*
  * Generate a Xen blkfront IO request from a blk layer request.  Reads
  * and writes are handled as expected.
@@ -575,6 +598,9 @@ static int blkif_queue_request(struct request *req)
 
 	/* Keep a private copy so we can reissue requests when recovering. */
 	info->shadow[id].req = *ring_req;
+
+	// KevinBoos: latency start
+	info->start_times[id] = get_total_nsec();
 
 	if (new_persistent_gnts)
 		gnttab_free_grant_references(gref_head);
@@ -1127,6 +1153,7 @@ static void blkif_completion(struct blk_shadow *s, struct blkfront_info *info,
 	}
 }
 
+
 static irqreturn_t blkif_interrupt(int irq, void *dev_id)
 {
 	struct request *req;
@@ -1166,8 +1193,12 @@ static irqreturn_t blkif_interrupt(int irq, void *dev_id)
 		}
 		req  = info->shadow[id].request;
 
-		if (bret->operation != BLKIF_OP_DISCARD)
+		if (bret->operation != BLKIF_OP_DISCARD) {
+			if (enable_print_latency) 
+				printk("LATENCY: %ld\n", get_total_nsec() - info->start_times[id]); //KevinBoos
+
 			blkif_completion(&info->shadow[id], info, bret);
+		}
 
 		if (add_id_to_freelist(info, id)) {
 			WARN(1, "%s: response to %s (id %ld) couldn't be recycled!\n",

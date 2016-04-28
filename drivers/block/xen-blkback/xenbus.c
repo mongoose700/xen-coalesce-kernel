@@ -121,7 +121,7 @@ static inline void init_coalesce_info(struct coalesce_info *ci)
 	ci->count_up = 1;
 	ci->skip_up = 1;
 	ci->counter = 0;
-	ci->epoch_start = CURRENT_TIME;
+	ci->epoch_start = 0;
 	ci->curr_iops = 0;
 	atomic_set(&ci->next_iops, 0);
 	spin_lock_init(&ci->recalc_lock);
